@@ -1,32 +1,25 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { 
-    BLOCK_TIME, 
-    BOT_MANAGER_TOKEN, 
-    MAX_COPY_PER_MINUTE 
+    BLOCK_TIME,
+    MAX_COPY_PER_MINUTE,
+    ID_GROUP_FIRST,
+    ID_GROUP_SECOND,
 } = require('../helper/constant')
 
 class BotManager {
     constructor() {
         this.botStaffs = [];
+        this.botIds = [];
         this.blockedBots = new Set();
         this.lastMinuteMsgCount = new Map();
-        this.chatIdFirst;
-        this.chatIdSecond;
-        this.messageQueue = [];
+        this.chatIdFirst = ID_GROUP_FIRST;
+        this.chatIdSecond = ID_GROUP_SECOND;
+        this.messageQueue = {};
         this.processingMessage = false;
-
-        if(BOT_MANAGER_TOKEN) {
-            // Khởi tạo Bot Manager
-            this.managerBot = new TelegramBot(BOT_MANAGER_TOKEN, { polling: { params: { limit: 10, timeout: 2 }} });
-            this.managerBot.on('message', (msg) => this.handleMessage(msg));
-        } else {
-            console.log('NOT FOUND BOT MANAGER TOKEN');
-        }
-
     }
 
     // Xử lý tin nhắn từ Bot Manager
-    handleMessage(msg) {
+    handleMessage(msg, botId) {
         this.setChatId(msg.chat.id);
         
         if(!this.chatIdSecond) {
@@ -38,12 +31,15 @@ class BotManager {
             toChatId: msg.chat.id == this.chatIdFirst ? this.chatIdSecond : this.chatIdFirst,
             messageId: msg.message_id,
             caption: msg.caption || '',
-            message: msg
+            text: msg.text,
         };
 
         // Xử lý tin nhắn từ Bot Manager và thêm vào hàng đợi
-        this.messageQueue.push(message);
-
+        if(this.messageQueue[botId]) {
+            this.messageQueue[botId].push(message);
+        } else {
+            this.messageQueue[botId] = [message];
+        }
 
         // Kiểm tra xem có đang xử lý tin nhắn hay không
         if (!this.processingMessages) {
@@ -52,76 +48,96 @@ class BotManager {
     }
 
     // Phân phối tin nhắn cho các Bot Staff
-    distributeMessage(message) {
+    distributeMessage(message, availableBot) {
 
         if (this.botStaffs.length === 0) {
             console.log("No available Bot Staff.");
-            return;
-        }
-
-        // Kiểm tra xem Bot nào có thể nhận tin nhắn
-        let availableBot = this.botStaffs.find(bot => !this.blockedBots.has(bot.token));
-        if (!availableBot) {
-            console.log("All Bot Staffs are blocked.");
-            return;
+            return false;
         }
 
         availableBot.bot.copyMessage(message.toChatId, message.fromChatId, message.messageId, { caption: message.caption })
-            .then((copiedMessage) => {
-                console.log('Message copied successfully:', copiedMessage);
+            .then(() => {
+                this.shiftAllQueue();
+                this.checkBot(availableBot);
+                return true;
             })
             .catch((error) => {
                 if(error.message.includes('ETELEGRAM: 429 Too Many Requests')) {
-                    this.blockBot(availableBot.token);
-                    this.distributeMessage(message);
+                    this.blockBot(availableBot.botId);
+                    this.processMessages();
+                    console.error('Error copying message:', error.message);
+                    throw error;
                 }
-                console.log('ERROR', message)
-                console.error('Error copying message:', error.message);
             });
 
+    }
+
+    shiftAllQueue() {
+        this.botIds.forEach((botId) => {
+            this.messageQueue[botId].shift()
+        })
+    }
+ 
+    checkBot(availableBot) {
         const currentMinute = Math.floor(Date.now() / 1000 / 60);
-        const msgCount = this.lastMinuteMsgCount.get(availableBot.token) || 0;
+        const msgCount = this.lastMinuteMsgCount.get(availableBot.botId) || 0;
         if (currentMinute === availableBot.lastMinute) {
-            this.lastMinuteMsgCount.set(availableBot.token, msgCount + 1);
+            this.lastMinuteMsgCount.set(availableBot.botId, msgCount + 1);
         } else {
-            this.lastMinuteMsgCount.set(availableBot.token, 1);
+            this.lastMinuteMsgCount.set(availableBot.botId, 1);
             availableBot.lastMinute = currentMinute;
         }
 
         if (msgCount + 1 >= MAX_COPY_PER_MINUTE) {
-            this.blockBot(availableBot.token);
+            this.blockBot(availableBot.botId);
         }
+        
     }
 
     // Block Bot trong một khoảng thời gian
-    blockBot(botToken) {
-        this.blockedBots.add(botToken);
+    blockBot(botId) {
+        this.blockedBots.add(botId);
         setTimeout(() => {
-            this.unblockBot(botToken);
+            this.unblockBot(botId);
         }, BLOCK_TIME * 1000);
     }
 
     // Unblock Bot sau khi hết thời gian block
-    unblockBot(botToken) {
-        this.blockedBots.delete(botToken);
-        this.lastMinuteMsgCount.delete(botToken);
-        const botIndex = this.botStaffs.findIndex(bot => bot.token === botToken);
+    unblockBot(botId) {
+        this.blockedBots.delete(botId);
+        this.lastMinuteMsgCount.delete(botId);
+        const botIndex = this.botStaffs.findIndex(bot => bot.botId === botId);
         if (botIndex !== -1) {
             this.botStaffs[botIndex].lastMinute = null; // Reset lastMinute
         }
     }
 
-    // Thêm Bot Staff vào danh sách
-    addBotStaff(botToken) {
-
-        if(botToken === BOT_MANAGER_TOKEN) {
-            this.botStaffs.push({ bot: this.managerBot, token: botToken, lastMinute: null });
+    getAvailableBot() {
+        // Kiểm tra xem Bot nào có thể nhận tin nhắn
+        const availableBot = this.botStaffs.find(bot => !this.blockedBots.has(bot.botId));
+        if (!availableBot) {
+            console.log("All Bot Staffs are blocked.");
             return;
         }
 
-        const bot = new TelegramBot(botToken, { polling: { params: { limit: 10, timeout: 2 }} });
-        bot.on('message', (msg) => { });
-        this.botStaffs.push({ bot, token: botToken, lastMinute: null });
+        return availableBot;
+    }
+
+    // Thêm Bot Staff vào danh sách
+    addBotStaff(botToken) {
+        const bot = new TelegramBot(botToken, { polling: { params: { limit: 10, timeout: 1 }} });
+        bot.getMe().then((user) => { 
+            const botId = user.id;
+            this.botIds.push(botId);
+            bot.on('message', (msg) => {
+                this.handleMessage(msg, botId) 
+            });
+            
+            this.botStaffs.push({ bot, token: botToken, lastMinute: null, botId});
+        }).catch((error) => {
+            console.log('TOKEN BOT::', botToken);
+            console.log(error);
+        })
     }
 
     setChatId(chatId) {
@@ -131,10 +147,10 @@ class BotManager {
 
         if (!this.chatIdFirst) {
             this.chatIdFirst = chatId;
-            console.log(`Set ${chatId} added to group chatIdFirst`);
+            console.log(`ID_GROUP_FIRST:: ${chatId}`);
         } else if(!this.chatIdSecond && this.chatIdFirst !== chatId) {
             this.chatIdSecond = chatId;
-            console.log(`Set ${chatId} added to group chatIdSecond`);
+            console.log(`ID_GROUP_SECOND:: ${chatId}`);
         } else {
             console.log(`Error: User ${chatId} sent message from unexpected group`);
             return;
@@ -142,20 +158,27 @@ class BotManager {
     }
 
     processMessages() {
-
+        const availableBot = this.getAvailableBot();
+        const desiredLength = 10;
         this.processingMessages = true;
-        const messagesToProcess = this.messageQueue.splice(0, 13);
-
-        messagesToProcess.forEach((msg, idx) => {
-            setTimeout(() => this.distributeMessage(msg), idx * 1500);
-        });
-
-        this.processingMessages = false;
-        if (this.messageQueue.length > 0) {
-            setTimeout(() => {
-                this.processMessages();
-            }, 10000);
+        if(this.messageQueue[availableBot.botId]) {
+            const actualLength = Math.min(desiredLength,  this.messageQueue[availableBot.botId].length);
+            const messagesToProcess = this.messageQueue[availableBot.botId].splice(0, actualLength);
+    
+            for (const msg of messagesToProcess) {
+                try {
+                    this.distributeMessage(msg, availableBot);
+                } catch (error) {
+                    break;
+                }
+            }
+            if (this.messageQueue[availableBot.botId].length > 0) {
+                setTimeout(() => {
+                    this.processMessages();
+                }, 5000);
+            }
         }
+        this.processingMessages = false;
     }
 }
  module.exports = new BotManager()
