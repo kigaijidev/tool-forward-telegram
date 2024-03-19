@@ -7,6 +7,7 @@ Forward Assistant là một ứng dụng được tạo ra từ NodeJS và node-
 ### Tải ứng dụng
 
 Bạn có thể tải ứng dụng từ phần [Release]([https://github.com/kigaijidev/tool-forward-telegram](https://github.com/kigaijidev/tool-forward-telegram) trên GitHub. 
+- Copy file `.env.example` ra file mới tên `.env`. Nhập token của BOT và group_id nếu có.
 - Bạn cần cài đặt các dependencies bằng lệnh `npm install`, sau đó chạy ứng dụng bằng lệnh `npm run start`. 
 
 ### Cài đặt và sử dụng
